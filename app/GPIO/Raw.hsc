@@ -1,11 +1,11 @@
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 module GPIO.Raw where
 
 import Foreign
 import Foreign.C.Types
 import Foreign.C.Error
-import Foreign.C.String
 import Data.ByteString qualified as BS
 import Data.ByteString (ByteString)
 
@@ -20,6 +20,7 @@ data GpioV2LineConfig = GpioV2LineConfig
   , numAttrs :: Word32
   -- TODO: gpio_v2_line_config_attribute
   }
+
 
 instance Storable GpioV2LineConfig where
   sizeOf _  = #size struct gpio_v2_line_config
@@ -41,6 +42,16 @@ data GpioV2LineRequest = GpioV2LineRequest
   , numLines        :: Word32
   , eventBufferSize :: Word32
   , fileDescriptor  :: Int32
+  }
+
+emptyReq :: GpioV2LineRequest
+emptyReq = GpioV2LineRequest
+  { offsets = []
+  , consumer = ""
+  , config = GpioV2LineConfig output 0
+  , numLines = 0
+  , eventBufferSize = 0
+  , fileDescriptor = 0
   }
 
 instance Storable GpioV2LineRequest where

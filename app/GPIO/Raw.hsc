@@ -5,6 +5,7 @@ module GPIO.Raw where
 
 import Foreign
 import Foreign.C.Types
+import System.Posix.IO
 import Foreign.C.Error
 import Data.ByteString qualified as BS
 import Data.ByteString (ByteString)
@@ -12,15 +13,79 @@ import Data.ByteString (ByteString)
 #include <linux/gpio.h>
 #include <fcntl.h>
 
-output :: Word64
-output = #const GPIO_V2_LINE_FLAG_OUTPUT
+
+newtype GpioV2LineFlag = GpioV2LineFlag { unGpioV2LineFlag :: Word64 }
+
+attributeIdFlags :: Word32
+attributeIdFlags = #{const GPIO_V2_LINE_ATTR_ID_FLAGS}
+
+attributeIdValues :: Word32
+attributeIdValues = #{const GPIO_V2_LINE_ATTR_ID_OUTPUT_VALUES}
+
+-- https://docs.kernel.org/userspace-api/gpio/chardev.html#c.gpio_v2_line_flag
+#{enum GpioV2LineFlag, GpioV2LineFlag
+  , flagUsed = GPIO_V2_LINE_FLAG_USED
+  , flagActiveLow = GPIO_V2_LINE_FLAG_ACTIVE_LOW
+  , flagInput = GPIO_V2_LINE_FLAG_INPUT
+  , flagOutput = GPIO_V2_LINE_FLAG_OUTPUT
+  , flagEdgeRising = GPIO_V2_LINE_FLAG_EDGE_RISING
+  , flagEdgeFalling = GPIO_V2_LINE_FLAG_EDGE_FALLING
+  , flagOpenDrain = GPIO_V2_LINE_FLAG_OPEN_DRAIN
+  , flagOpenSource = GPIO_V2_LINE_FLAG_OPEN_SOURCE
+  , flagBiasPullUp = GPIO_V2_LINE_FLAG_BIAS_PULL_UP
+  , flagBiasPullDown = GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN
+  , flagBiasDisabled = GPIO_V2_LINE_FLAG_BIAS_DISABLED
+  , flagEventClockRealtime = GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME
+  , flagEventClockHte = GPIO_V2_LINE_FLAG_EVENT_CLOCK_HTE
+}
+
+data GpioV2LineAttribute = GpioV2LineAttribute
+  { attributeId :: Word32
+  , attributeFlags :: Word64 -- line flags added together
+  }
+
+instance Storable GpioV2LineAttribute where
+  sizeOf _  = #size struct gpio_v2_line_attribute
+  alignment _ = #alignment struct gpio_v2_line_attribute
+  peek p = do
+    attributeId <- #{peek struct gpio_v2_line_attribute, id} p
+    attributeFlags <- #{peek struct gpio_v2_line_attribute, flags} p
+    pure GpioV2LineAttribute {..}
+  poke p GpioV2LineAttribute{..} = do
+    fillBytes p 0 #{size struct gpio_v2_line_attribute}
+    #{poke struct gpio_v2_line_attribute, id} p attributeId
+    #{poke struct gpio_v2_line_attribute, flags} p attributeFlags
+      
+
+data GpioV2LineConfigAttribute = GpioV2LineConfigAttribute
+  { configAttr :: GpioV2LineAttribute
+  , configMask :: Word64
+  }
+
+instance Storable GpioV2LineConfigAttribute where
+  sizeOf _  = #size struct gpio_v2_line_config_attribute
+  alignment _ = #alignment struct gpio_v2_line_config_attribute
+  peek p = do
+    configAttr <- #{peek struct gpio_v2_line_config_attribute, attr} p
+    configMask <- #{peek struct gpio_v2_line_config_attribute, mask} p
+    pure GpioV2LineConfigAttribute {..}
+  poke p GpioV2LineConfigAttribute{..} = do
+    fillBytes p 0 #{size struct gpio_v2_line_config_attribute}
+    #{poke struct gpio_v2_line_config_attribute, attr} p configAttr
+    #{poke struct gpio_v2_line_config_attribute, mask} p configMask
+      
+
+emptyLineConfigAttribute :: GpioV2LineConfigAttribute
+emptyLineConfigAttribute = GpioV2LineConfigAttribute
+  { configAttr = GpioV2LineAttribute { attributeId = 0, attributeFlags = 0 }
+  , configMask = 0
+  }
 
 data GpioV2LineConfig = GpioV2LineConfig
   { flags :: Word64
   , numAttrs :: Word32
-  -- TODO: gpio_v2_line_config_attribute
+  , attrs :: [GpioV2LineConfigAttribute]
   }
-
 
 instance Storable GpioV2LineConfig where
   sizeOf _  = #size struct gpio_v2_line_config
@@ -28,11 +93,14 @@ instance Storable GpioV2LineConfig where
   peek p = do
     flags    <- #{peek struct gpio_v2_line_config, flags} p
     numAttrs <- #{peek struct gpio_v2_line_config, num_attrs} p
+    attrs    <- peekArray #{const GPIO_V2_LINE_NUM_ATTRS_MAX} (#{ptr struct gpio_v2_line_config, attrs} p)
     pure GpioV2LineConfig {..}
   poke p GpioV2LineConfig{..} = do
     fillBytes p 0 #{size struct gpio_v2_line_config}
     #{poke struct gpio_v2_line_config, flags} p flags
     #{poke struct gpio_v2_line_config, num_attrs} p numAttrs
+    let padded = take #{const GPIO_V2_LINE_NUM_ATTRS_MAX} (attrs <> repeat emptyLineConfigAttribute)
+    pokeArray (#{ptr struct gpio_v2_line_config, attrs} p) padded
       
 
 data GpioV2LineRequest = GpioV2LineRequest
@@ -42,16 +110,6 @@ data GpioV2LineRequest = GpioV2LineRequest
   , numLines        :: Word32
   , eventBufferSize :: Word32
   , fileDescriptor  :: Int32
-  }
-
-emptyReq :: GpioV2LineRequest
-emptyReq = GpioV2LineRequest
-  { offsets = []
-  , consumer = ""
-  , config = GpioV2LineConfig output 0
-  , numLines = 0
-  , eventBufferSize = 0
-  , fileDescriptor = 0
   }
 
 instance Storable GpioV2LineRequest where

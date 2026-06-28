@@ -12,11 +12,10 @@ import Control.Monad
 
 blink :: IO ()
 blink = do
-    let req = LineRequest "Example:blink" $ Set.singleton (AsOutput (OutPin GPIO3 False))
-    withLine req $
+    withLine @'[ '( 'GPIO3, 'Output) ] "Example:blink" $
         (forever $ do
-            writePin (OutPin GPIO3 False)
+            writePin @'GPIO3 False
             liftIO $ threadDelay 500_000
-            writePin (OutPin GPIO3 True)
-            liftIO $ threadDelay 500_000) 
-          `finally` writePin (OutPin GPIO3 False)
+            writePin @'GPIO3 True
+            liftIO $ threadDelay 500_000)
+          `finally` writePin @'GPIO3 False

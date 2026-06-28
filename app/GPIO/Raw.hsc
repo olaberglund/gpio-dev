@@ -5,7 +5,6 @@ module GPIO.Raw where
 
 import Foreign
 import Foreign.C.Types
-import System.Posix.IO
 import Foreign.C.Error
 import Data.ByteString qualified as BS
 import Data.ByteString (ByteString)
@@ -161,5 +160,9 @@ requestLines fd p =
     (c_ioctl (fromIntegral fd) #{const GPIO_V2_GET_LINE_IOCTL} p)
 
 setValues :: CInt -> Ptr GpioV2LineValues -> IO ()
-setValues fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_GET_LINE" 
+setValues fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_LINE_SET_VALUES_IOCTL" 
     (c_ioctl (fromIntegral fd) #{const GPIO_V2_LINE_SET_VALUES_IOCTL} p)
+
+getValues :: CInt -> Ptr GpioV2LineValues -> IO ()
+getValues fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_LINE_GET_VALUES_IOCTL" 
+    (c_ioctl (fromIntegral fd) #{const GPIO_V2_LINE_GET_VALUES_IOCTL} p)

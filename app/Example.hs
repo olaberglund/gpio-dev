@@ -4,19 +4,19 @@
 module Example where
 
 import GPIO.Prelude
-import Data.Set qualified as Set
 import Control.Concurrent
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Catch
 import Control.Monad
 
+type BlinkReqs = '[ '(GPIO3, Output), '(GPIO2, Input) ]
+
 blink :: IO ()
 blink = do
-    let req = LineRequest "Example:blink" $ Set.singleton (AsOutput (OutPin GPIO3 False))
-    withLine req $
+    withLine @BlinkReqs "Example:blink" $
         (forever $ do
-            writePin (OutPin GPIO3 False)
+            writePin @GPIO3 False
             liftIO $ threadDelay 500_000
-            writePin (OutPin GPIO3 True)
-            liftIO $ threadDelay 500_000) 
-          `finally` writePin (OutPin GPIO3 False)
+            _ <- readPin @GPIO2
+            liftIO $ threadDelay 500_000)
+          `finally` writePin @GPIO3 False

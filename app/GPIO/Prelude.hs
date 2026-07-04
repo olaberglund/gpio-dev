@@ -177,8 +177,8 @@ writePin
     => Bool -> LineM reqs ()
 writePin val = LineM $ do
     Lines{lFd = Fd unFd, ..} <- ask
-    let idx     = (fromIntegral (natVal (Proxy @(IndexOf pin 'Output reqs))))::Int
-        shifted = flip shift idx
+    let idx::Int = fromIntegral (natVal (Proxy @(IndexOf pin 'Output reqs)))
+        shifted  = flip shift idx
     liftIO . poke lValPtr $ GpioV2LineValues (shifted (fromBool val)) (shifted 1)
     liftIO $ setValues unFd lValPtr
 
@@ -186,10 +186,11 @@ readPin
     :: forall pin reqs. KnownNat (IndexOf pin 'Input reqs)
     => LineM reqs Bool
 readPin = LineM $ do
-    Lines{..} <- ask
-    let idx = (fromIntegral (natVal (Proxy @(IndexOf pin 'Input reqs))))::Int
-    active <- liftIO (testBit idx . fromIntegral . bits <$> peek lValPtr)
-    pure active
+    Lines{lFd = Fd unFd, ..} <- ask
+    let idx::Int = fromIntegral (natVal (Proxy @(IndexOf pin 'Input reqs)))
+    liftIO $ poke lValPtr (GpioV2LineValues 0 (bit idx))
+    liftIO $ getValues unFd lValPtr
+    liftIO $ flip testBit idx . fromIntegral . bits <$> peek lValPtr
 
 
 withChip :: (Fd -> IO ()) -> IO ()

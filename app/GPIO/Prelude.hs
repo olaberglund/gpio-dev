@@ -2,6 +2,7 @@
 {-# LANGUAGE ViewPatterns #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
 {-# LANGUAGE TypeApplications #-}
@@ -12,6 +13,7 @@ import Data.Proxy (Proxy(..))
 import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad.Catch
 import Control.Monad.Trans.Reader
+import Data.Kind (Constraint)
 import Data.ByteString (ByteString)
 import Data.Function (on)
 import Foreign
@@ -21,15 +23,20 @@ import System.Posix.IO
 import System.Posix.Types
 
 data Bias = PullUp | PullDown
+  deriving Eq
 
 data Edge = Rising | Falling
+  deriving Eq
 
-data EdgeDetection = EdgeDetection 
-  { edge :: Edge
-  , eventBufferSize :: Int
-  }
+-- data EdgeDetection = EdgeDetection 
+--   { edge :: Edge
+--   , eventBufferSize :: Int
+--   }
 
-data Pin = AsOutput Pi5Gpio Bool | AsInput Pi5Gpio Bias EdgeDetection
+data PinSpec = OutSpec Bool | InSpec Bias Edge
+  deriving Eq
+
+data Pin = Pin { pinGpio :: Pi5Gpio, pinSpec ::  PinSpec }
 
 instance Eq Pin where
   (==) = (==) `on` pinOffset
@@ -43,30 +50,62 @@ data Pi5Gpio
 
 data Lines = Lines { lFd :: Fd, lValPtr :: Ptr GpioV2LineValues, lReq :: LineRequest }
 
-newtype LineM (reqs :: [(Pi5Gpio, Direction)]) a = LineM (ReaderT Lines IO a)
+newtype LineM (reqs::[Pin]) a = LineM (ReaderT Lines IO a)
     deriving (Functor, Applicative, Monad, MonadIO, MonadThrow, MonadCatch, MonadMask)
 
 data Direction = Output | Input
 
-type IndexOf :: Pi5Gpio -> Direction -> [(Pi5Gpio, Direction)] -> Nat
-type family IndexOf pin dir reqs where
-    IndexOf pin dir ('(pin, dir) ': _)   = 0
-    IndexOf pin dir (_           ': rest) = 1 + IndexOf pin dir rest
-    IndexOf pin dir '[]                   =
+type PinIndex :: Pi5Gpio -> [Pin] -> Nat
+type family PinIndex pin reqs where
+  PinIndex pin ('Pin pin _ ': _)    = 0
+  PinIndex pin (_   ': rest) = 1 + PinIndex pin rest
+  PinIndex pin '[] =
+    TypeError ('ShowType pin ':<>: 'Text " was not requested")
+
+type DirectedPinIndex :: Pi5Gpio -> Direction -> [Pin] -> Nat
+type family DirectedPinIndex pin dir reqs where
+    DirectedPinIndex pin 'Input  ('Pin pin ('InSpec  _ _) ': _) = 0
+    DirectedPinIndex pin 'Output ('Pin pin ('OutSpec _)   ': _) = 0
+    DirectedPinIndex pin dir (_ ': rest) = 1 + DirectedPinIndex pin dir rest
+    DirectedPinIndex pin dir '[] =
       TypeError ('ShowType pin
-            ':<>: 'Text " was not requested with the required direction")
+            ':<>: 'Text " was not requested with the required direction (" ':<>: 'ShowType dir ':<>: 'Text ")" )
+
+
+type FixedPull :: Pi5Gpio -> Maybe Bias
+type family FixedPull pin where
+    FixedPull 'GPIO2 = 'Just 'PullUp
+    FixedPull 'GPIO3 = 'Just 'PullUp
+    FixedPull _      = 'Nothing
+
+type ValidBias :: Pi5Gpio -> Bias -> Constraint
+type family ValidBias pin bias where
+    ValidBias pin bias = CheckPull pin bias (FixedPull pin)
+
+type CheckPull :: Pi5Gpio -> Bias -> Maybe Bias -> Constraint
+type family CheckPull pin bias fixed where
+    CheckPull pin 'PullDown ('Just 'PullUp) =
+        TypeError ('ShowType pin ':<>: 'Text " has a fixed hardware pull-up. PullDown is impossible.")
+    CheckPull _ _ _ = ()
+
+class Requested (pin :: Pi5Gpio) (reqs :: [Pin]) where
+  pinIndex :: Int
+
+instance KnownNat (PinIndex pin reqs) => Requested pin reqs where
+  pinIndex = fromIntegral (natVal (Proxy @(PinIndex pin reqs)))
+
+class Requested pin reqs => RequestedAs (dir :: Direction) pin reqs
+
+instance ( Requested pin reqs
+         , DirectedPinIndex pin dir reqs ~ PinIndex pin reqs )
+      => RequestedAs dir pin reqs
+
+type RequestedOutput = RequestedAs 'Output
+
+type RequestedInput = RequestedAs 'Input
 
 class KnownPin (pin :: Pi5Gpio) where
   pinVal :: Pi5Gpio
-
-class KnownDir (dir :: Direction) where
-  dirVal :: Direction
-
-instance KnownDir 'Output
-  where dirVal = Output
-
-instance KnownDir 'Input
-  where dirVal = Input
 
 instance KnownPin 'GPIO0  where pinVal = GPIO0
 instance KnownPin 'GPIO1  where pinVal = GPIO1
@@ -97,23 +136,28 @@ instance KnownPin 'GPIO25 where pinVal = GPIO25
 instance KnownPin 'GPIO26 where pinVal = GPIO26
 instance KnownPin 'GPIO27 where pinVal = GPIO27
 
-class KnownReq (reqs :: [(Pi5Gpio, Direction)]) where
-  reqVal :: [(Pi5Gpio, Direction)]
-
+class KnownReq (reqs :: [Pin]) where
+  reqVal :: [Pin]
 instance KnownReq '[] where
   reqVal = []
 
-instance (KnownPin pin, KnownDir dir, KnownReq rest)
-      => KnownReq ('(pin, dir) ': rest) where
-  reqVal = (pinVal @pin, dirVal @dir) : reqVal @rest
+class KnownBias (b :: Bias) where biasVal :: Bias
+instance KnownBias 'PullUp where biasVal = PullUp
+instance KnownBias 'PullDown where biasVal = PullDown
+
+class KnownEdge (e :: Edge) where edgeVal :: Edge
+instance KnownEdge 'Rising where edgeVal = Rising
+instance KnownEdge 'Falling where edgeVal = Falling
+
+instance (KnownPin pin, KnownBias bias, KnownEdge edg, ValidBias pin bias, KnownReq rest)
+      => KnownReq ('Pin pin ('InSpec bias edg) ': rest) where
+  reqVal = Pin (pinVal @pin) (InSpec (biasVal @bias) (edgeVal @edg)) : reqVal @rest
 
 offset :: Pi5Gpio -> Int
 offset = fromEnum
   
 pinOffset :: Pin -> Int
-pinOffset = \case
-    AsOutput (offset -> o) _  -> o
-    AsInput  (offset -> o) _ _ -> o
+pinOffset = offset . pinGpio
 
 data LineRequest = LineRequest
   { consumer :: ByteString
@@ -134,26 +178,30 @@ gpioV2LineRequest lr@(LineRequest{..}) = GpioV2LineRequest
 gpioV2LineConfig :: LineRequest -> GpioV2LineConfig 
 gpioV2LineConfig LineRequest{..} = GpioV2LineConfig
   { flags = 0
-  , numAttrs = fromIntegral . sum . map (length . directionFlags) $ requests
-  , attrs = concat $ zipWith configAttributes requests [0 ..]
+  , numAttrs = fromIntegral (length attrs)
+  , attrs
   }
+  where
+      attrs = concat $ zipWith configAttributes requests [0 ..]
 
 configAttributes :: Pin -> Int -> [GpioV2LineConfigAttribute]
-configAttributes pin offsetIdx = flags : values
+configAttributes (Pin _ spec) offsetIdx = flags : values
   where
-      flags = 
+      flags =
           GpioV2LineConfigAttribute
             (GpioV2LineAttribute attributeIdFlags dirFlagSum)
             (bit offsetIdx)
 
-      values = case pin of
-          AsOutput (fromIntegral . (`shift` offsetIdx) . fromEnum -> initMask) _ -> 
+      values = case spec of
+          OutSpec v ->
               [ GpioV2LineConfigAttribute
-                  (GpioV2LineAttribute attributeIdValues initMask)
-                  (bit offsetIdx)] 
-          _ -> []
+                  (GpioV2LineAttribute attributeIdValues (initMask v))
+                  (bit offsetIdx) ]
+          InSpec{} -> []
 
-      dirFlagSum = sum . map unGpioV2LineFlag . directionFlags $ pin
+      initMask v = fromIntegral (fromEnum v `shift` offsetIdx)
+
+      dirFlagSum = sum . map unGpioV2LineFlag . directionFlags $ spec
 
 biasFlag :: Bias -> GpioV2LineFlag
 biasFlag = \case
@@ -165,33 +213,34 @@ edgesFlag = \case
   Rising -> flagEdgeRising
   Falling -> flagEdgeFalling
     
-directionFlags :: Pin -> [GpioV2LineFlag]
+directionFlags :: PinSpec -> [GpioV2LineFlag]
 directionFlags = \case
-  AsInput _ ipBias ipEdge  ->
-      [ flagInput, biasFlag ipBias, edgesFlag (edge ipEdge) ]
-  AsOutput _ _ ->
-      [ flagOutput ]
+  InSpec isBias isEdge  -> [ flagInput, biasFlag isBias, edgesFlag isEdge ]
+  OutSpec _ -> [ flagOutput ]
 
 writePin
-    :: forall pin reqs. KnownNat (IndexOf pin 'Output reqs)
+    :: forall pin reqs. RequestedOutput pin reqs
     => Bool -> LineM reqs ()
-writePin val = LineM $ do
+writePin val = LineM do
     Lines{lFd = Fd unFd, ..} <- ask
-    let idx::Int = fromIntegral (natVal (Proxy @(IndexOf pin 'Output reqs)))
-        shifted  = flip shift idx
-    liftIO . poke lValPtr $ GpioV2LineValues (shifted (fromBool val)) (shifted 1)
+    let shifted  = flip shift (pinIndex @pin @reqs)
+    liftIO . poke lValPtr . GpioV2LineValues (shifted (fromBool val)) $ shifted 1
     liftIO $ setValues unFd lValPtr
 
 readPin
-    :: forall pin reqs. KnownNat (IndexOf pin 'Input reqs)
+    :: forall pin reqs. Requested pin reqs
     => LineM reqs Bool
-readPin = LineM $ do
+readPin = LineM do
     Lines{lFd = Fd unFd, ..} <- ask
-    let idx::Int = fromIntegral (natVal (Proxy @(IndexOf pin 'Input reqs)))
-    liftIO $ poke lValPtr (GpioV2LineValues 0 (bit idx))
+    let idx = pinIndex @pin @reqs
+    liftIO . poke lValPtr . GpioV2LineValues 0 . bit $ idx
     liftIO $ getValues unFd lValPtr
     liftIO $ flip testBit idx . fromIntegral . bits <$> peek lValPtr
 
+togglePin 
+    :: forall pin reqs. RequestedOutput pin reqs
+    => LineM reqs ()
+togglePin = readPin @pin >>= writePin @pin . not
 
 withChip :: (Fd -> IO ()) -> IO ()
 withChip = bracket
@@ -210,10 +259,4 @@ withLine consumer (LineM act) =
                   closeFd
                   (\lFd -> alloca $ \lValPtr -> runReaderT act Lines{..})
     where
-      lReq = mkLineRequest consumer (reqVal @reqs)
-
-mkLineRequest :: ByteString -> [(Pi5Gpio, Direction)] -> LineRequest
-mkLineRequest consumer pds = LineRequest consumer (map toPin pds)
-    where
-      toPin (p, Output) = AsOutput p False
-      toPin (p, Input)  = AsInput p PullDown (EdgeDetection Rising 0)
+      lReq = LineRequest consumer (reqVal @reqs)

@@ -9,7 +9,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Catch
 import Control.Monad
 
-type BlinkReqs = '[ 'Pin GPIO2 ('InSpec 'PullDown 'Rising) ]
+type BlinkReqs = '[ 'Pin GPIO2 ('OutSpec 'True) ]
 
 blink :: IO ()
 blink = do
@@ -17,6 +17,5 @@ blink = do
         (do
             r1 <- readPin @GPIO2
             liftIO $ putStrLn $ "Read is: " <> show r1
-            liftIO $ threadDelay 200_000
             )
           -- `finally` writePin @GPIO17 False

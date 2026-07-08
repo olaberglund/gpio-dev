@@ -12,7 +12,6 @@ import Data.ByteString (ByteString)
 #include <linux/gpio.h>
 #include <fcntl.h>
 
-
 newtype GpioV2LineFlag = GpioV2LineFlag { unGpioV2LineFlag :: Word64 }
 
 attributeIdFlags :: Word32
@@ -151,6 +150,38 @@ instance Storable GpioV2LineValues where
         #{poke struct gpio_v2_line_values, bits} p bits
         #{poke struct gpio_v2_line_values, mask} p mask
 
+data GpioV2LineEvent = GpioV2LineEvent
+  { timestamp_ns :: Word64
+  , id :: Word32
+  , offset :: Word32
+  , seqno :: Word32
+  , line_seqno :: Word32
+  }
+
+newtype GpioV2LineEventId = GpioV2LineEventId { unGpioV2LineEventId :: Word32 }
+
+#{enum GpioV2LineEventId, GpioV2LineEventId
+  , risingEdge = GPIO_V2_LINE_EVENT_RISING_EDGE
+  , fallingEdge = GPIO_V2_LINE_EVENT_FALLING_EDGE
+}
+
+instance Storable GpioV2LineEvent where
+    sizeOf _ = #size struct gpio_v2_line_event
+    alignment _ = #alignment struct gpio_v2_line_event
+    peek p = do
+        timestamp_ns <- #{peek struct gpio_v2_line_event, timestamp_ns} p
+        id <- #{peek struct gpio_v2_line_event, id} p
+        offset <- #{peek struct gpio_v2_line_event, offset} p
+        seqno <- #{peek struct gpio_v2_line_event, seqno} p
+        line_seqno <- #{peek struct gpio_v2_line_event, line_seqno} p
+        pure GpioV2LineEvent{..}
+    poke p GpioV2LineEvent{..} = do
+        #{poke struct gpio_v2_line_event, timestamp_ns} p timestamp_ns
+        #{poke struct gpio_v2_line_event, id} p id
+        #{poke struct gpio_v2_line_event, offset} p offset
+        #{poke struct gpio_v2_line_event, seqno} p seqno
+        #{poke struct gpio_v2_line_event, line_seqno} p line_seqno
+
 foreign import ccall safe "sys/ioctl.h ioctl"
   c_ioctl :: CInt -> CULong -> Ptr a -> IO CInt
 
@@ -166,3 +197,9 @@ setValues fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_LINE_SET_VALUES_IOCTL"
 getValues :: CInt -> Ptr GpioV2LineValues -> IO ()
 getValues fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_LINE_GET_VALUES_IOCTL" 
     (c_ioctl (fromIntegral fd) #{const GPIO_V2_LINE_GET_VALUES_IOCTL} p)
+
+foreign import ccall safe "unistd.h read"
+    c_read :: CInt -> Ptr a -> CSize -> IO CInt
+
+readEvents :: CInt -> CSize -> Ptr GpioV2LineEvent -> IO CInt
+readEvents fd sz buf = throwErrnoIfMinus1 "read gpio event" (c_read (fromIntegral fd) buf sz)

@@ -9,29 +9,25 @@
 
 module GPIO.Prelude  where
 
-import Data.Proxy (Proxy(..))
-import Control.Monad.IO.Class (liftIO, MonadIO)
+import Control.Concurrent
 import Control.Monad.Catch
+import Control.Monad.IO.Class (liftIO, MonadIO)
 import Control.Monad.Trans.Reader
-import Data.Kind (Constraint)
 import Data.ByteString (ByteString)
 import Data.Function (on)
+import Data.Kind (Constraint)
+import Data.Proxy (Proxy(..))
 import Foreign
 import GHC.TypeLits (TypeError, ErrorMessage(..), Nat, type (+), KnownNat, natVal)
 import GPIO.Raw
 import System.Posix.IO
 import System.Posix.Types
 
-data Bias = PullUp | PullDown
+data Bias = PullUp | PullDown | PullUpDown
   deriving Eq
 
-data Edge = Rising | Falling
+data Edge = Rising | Falling | RisingAndFalling
   deriving Eq
-
--- data EdgeDetection = EdgeDetection 
---   { edge :: Edge
---   , eventBufferSize :: Int
---   }
 
 data PinSpec = OutSpec Bool | InSpec Bias Edge
   deriving Eq
@@ -149,19 +145,24 @@ class KnownEdge (e :: Edge) where edgeVal :: Edge
 instance KnownEdge 'Rising where edgeVal = Rising
 instance KnownEdge 'Falling where edgeVal = Falling
 
+class KnownBool (b :: Bool) where boolVal :: Bool
+instance KnownBool 'True  where boolVal = True
+instance KnownBool 'False where boolVal = False
+
 instance (KnownPin pin, KnownBias bias, KnownEdge edg, ValidBias pin bias, KnownReq rest)
       => KnownReq ('Pin pin ('InSpec bias edg) ': rest) where
   reqVal = Pin (pinVal @pin) (InSpec (biasVal @bias) (edgeVal @edg)) : reqVal @rest
 
-offset :: Pi5Gpio -> Int
-offset = fromEnum
-  
+instance (KnownPin pin, KnownBool val, KnownReq rest)
+      => KnownReq ('Pin pin ('OutSpec val) ': rest) where
+  reqVal = Pin (pinVal @pin) (OutSpec (boolVal @val)) : reqVal @rest
+
+
 pinOffset :: Pin -> Int
-pinOffset = offset . pinGpio
+pinOffset = fromEnum . pinGpio
 
 data LineRequest = LineRequest
   { consumer :: ByteString
-  -- , fileDescriptor :: Fd
   , requests :: [Pin]
   }
 
@@ -260,3 +261,15 @@ withLine consumer (LineM act) =
                   (\lFd -> alloca $ \lValPtr -> runReaderT act Lines{..})
     where
       lReq = LineRequest consumer (reqVal @reqs)
+
+nextEvents
+    :: forall pin reqs. RequestedInput pin reqs
+    => LineM reqs [GpioV2LineEvent]
+nextEvents = LineM do
+    Lines{lFd = fd@(Fd unFd), ..} <- ask
+    let sz  = sizeOf (undefined :: GpioV2LineEvent)
+        cap = 16
+    liftIO $ allocaBytes (cap * sz) $ \buf -> do
+        threadWaitRead fd
+        n <- readEvents unFd (fromIntegral (cap * sz)) buf
+        peekArray (fromIntegral n `div` sz) buf

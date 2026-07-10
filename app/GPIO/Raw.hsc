@@ -13,6 +13,7 @@ import Data.ByteString (ByteString)
 #include <fcntl.h>
 
 newtype GpioV2LineFlag = GpioV2LineFlag { unGpioV2LineFlag :: Word64 }
+  deriving (Eq, Bits)
 
 attributeIdFlags :: Word32
 attributeIdFlags = #{const GPIO_V2_LINE_ATTR_ID_FLAGS}
@@ -197,6 +198,10 @@ setValues fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_LINE_SET_VALUES_IOCTL"
 getValues :: CInt -> Ptr GpioV2LineValues -> IO ()
 getValues fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_LINE_GET_VALUES_IOCTL" 
     (c_ioctl (fromIntegral fd) #{const GPIO_V2_LINE_GET_VALUES_IOCTL} p)
+
+setLineConfigs :: CInt -> Ptr GpioV2LineConfig -> IO ()
+setLineConfigs fd p = throwErrnoIfMinus1_ "ioctl GPIO_V2_LINE_SET_CONFIG_IOCTL" 
+    (c_ioctl (fromIntegral fd) #{const GPIO_V2_LINE_SET_CONFIG_IOCTL} p)
 
 foreign import ccall safe "unistd.h read"
     c_read :: CInt -> Ptr a -> CSize -> IO CInt

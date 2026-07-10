@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE OverloadedStrings #-}
 
-module GPIO.Raw where
+module Gpio.Ioctl where
 
 import Foreign
 import Foreign.C.Types

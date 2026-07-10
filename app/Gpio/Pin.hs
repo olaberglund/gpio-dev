@@ -1,30 +1,20 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE BlockArguments #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE OverloadedRecordDot #-}
 
+module Gpio.Pin where
 
-module GPIO.Prelude  where
-
-import Control.Concurrent
 import Control.Monad.Catch
-import Control.Monad.IO.Class (liftIO, MonadIO)
-import Data.Coerce (coerce)
+import Control.Monad.IO.Class (MonadIO)
 import Control.Monad.Trans.Reader
 import Data.ByteString (ByteString)
 import Data.Function (on)
 import Data.Kind (Constraint)
 import Data.Proxy (Proxy(..))
 import Foreign
-import GHC.TypeLits (TypeError, ErrorMessage(..), Nat, type (+), KnownNat, natVal, Symbol)
-import GPIO.Raw
-import System.Posix.IO
+import GHC.TypeLits
+import Gpio.Ioctl
 import System.Posix.Types
 
 data Bias = PullUp | PullDown | PullUpDown
@@ -47,6 +37,11 @@ data Pi5Gpio
     | G14 | G15 | G16 | G17 | G18 | G19 | G20
     | G21 | G22 | G23 | G24 | G25 | G26 | G27
     deriving (Eq, Ord, Show, Enum, Bounded)
+
+data LineRequest = LineRequest
+  { consumer :: ByteString
+  , requests :: [Pin]
+  }
 
 data Lines = Lines { lFd :: Fd, lValPtr :: Ptr GpioV2LineValues, lReq :: LineRequest }
 
@@ -185,14 +180,15 @@ instance (KnownPin pin, KnownBool val, KnownReq rest)
       => KnownReq ('Pin pin ('OutSpec val) ': rest) where
   reqVal = Pin (pinVal @pin) (OutSpec (boolVal @val)) : reqVal @rest
 
+type AsInput :: [Pin] -> [Pin]
+type family AsInput pins where
+  AsInput '[] = '[]
+  AsInput ('Pin G2 _ ': rest) = 'Pin G2 ('InSpec 'PullUp 'Falling) ': AsInput rest
+  AsInput ('Pin G3 _ ': rest) = 'Pin G3 ('InSpec 'PullUp 'Falling) ': AsInput rest
+  AsInput ('Pin p _ ': rest) = 'Pin p ('InSpec 'PullDown 'Falling) ': AsInput rest
 
 pinOffset :: Pin -> Int
 pinOffset = fromEnum . pinGpio
-
-data LineRequest = LineRequest
-  { consumer :: ByteString
-  , requests :: [Pin]
-  }
 
 gpioV2LineRequest :: LineRequest -> GpioV2LineRequest
 gpioV2LineRequest lr@(LineRequest{..}) = GpioV2LineRequest
@@ -236,6 +232,7 @@ biasFlag :: Bias -> GpioV2LineFlag
 biasFlag = \case
   PullUp -> flagBiasPullUp
   PullDown -> flagBiasPullDown
+  PullUpDown -> flagBiasPullUp .|. flagBiasPullDown
 
 edgesFlag :: Edge -> GpioV2LineFlag
 edgesFlag = \case
@@ -247,80 +244,3 @@ directionFlags :: PinSpec -> [GpioV2LineFlag]
 directionFlags = \case
   InSpec isBias isEdge  -> [ flagInput, biasFlag isBias, edgesFlag isEdge ]
   OutSpec _ -> [ flagOutput ]
-
-writePin
-    :: forall pin reqs. RequestedOutput pin reqs
-    => Bool -> LineM reqs ()
-writePin val = LineM do
-    Lines{lFd = Fd unFd, ..} <- ask
-    let shifted  = flip shift (pinIndex @pin @reqs)
-    liftIO . poke lValPtr . GpioV2LineValues (shifted (fromBool val)) $ shifted 1
-    liftIO $ setValues unFd lValPtr
-
-readPin
-    :: forall pin reqs. Requested pin reqs
-    => LineM reqs Bool
-readPin = LineM do
-    Lines{lFd = Fd unFd, ..} <- ask
-    let idx = pinIndex @pin @reqs
-    liftIO . poke lValPtr . GpioV2LineValues 0 . bit $ idx
-    liftIO $ getValues unFd lValPtr
-    liftIO $ flip testBit idx . fromIntegral . bits <$> peek lValPtr
-
-togglePin 
-    :: forall pin reqs. RequestedOutput pin reqs
-    => LineM reqs ()
-togglePin = readPin @pin >>= writePin @pin . not
-
-withChip :: (Fd -> IO ()) -> IO ()
-withChip = bracket
-  (openFd "/dev/gpiochip0" ReadWrite defaultFileFlags)
-  closeFd
-
-withLineNoRestore
-    :: forall reqs. KnownReq reqs
-    => LineM reqs () -> IO ()
-withLineNoRestore (LineM act) =
-      withChip $ \(Fd chipFd) ->
-          with (gpioV2LineRequest lReq) \reqPtr -> do
-              bracket
-                  (requestLines chipFd reqPtr >> Fd . fromIntegral . fileDescriptor <$> peek reqPtr)
-                  closeFd
-                  (\lFd -> alloca $ \lValPtr -> runReaderT act Lines{..})
-    where
-      lReq = LineRequest "RPI5" (reqVal @reqs)
-
-withLine :: forall reqs. (KnownReq reqs, KnownReq (AsInput reqs), ValidReconfigure reqs (AsInput reqs))
-    => LineM reqs () -> IO ()
-withLine = withLineNoRestore . flip finally (resetPins @reqs)
-
-type AsInput :: [Pin] -> [Pin]
-type family AsInput pins where
-  AsInput '[] = '[]
-  AsInput ('Pin G2 _ ': rest) = 'Pin G2 ('InSpec 'PullUp 'Falling) ': AsInput rest
-  AsInput ('Pin G3 _ ': rest) = 'Pin G3 ('InSpec 'PullUp 'Falling) ': AsInput rest
-  AsInput ('Pin p _ ': rest) = 'Pin p ('InSpec 'PullDown 'Falling) ': AsInput rest
-
-resetPins :: forall reqs. (KnownReq reqs, KnownReq (AsInput reqs), ValidReconfigure reqs (AsInput reqs))
-    => LineM reqs ()
-resetPins = reconfigure @(AsInput reqs) (pure ())
-
-reconfigure :: forall newReqs reqs. (KnownReq reqs, KnownReq newReqs, ValidReconfigure reqs newReqs )
-    => LineM newReqs () -> LineM reqs ()
-reconfigure (LineM act) = LineM do
-    lines <- ask
-    let new = LineRequest lines.lReq.consumer $ reqVal @newReqs
-    liftIO $ with (gpioV2LineConfig new) (setLineConfigs (coerce lines.lFd))
-    local (\l -> l{lReq = new}) act
-
-nextEvents
-    :: forall pin reqs. RequestedInput pin reqs
-    => LineM reqs [GpioV2LineEvent]
-nextEvents = LineM do
-    Lines{lFd = fd@(Fd unFd), ..} <- ask
-    let sz  = sizeOf (undefined :: GpioV2LineEvent)
-        cap = 16
-    liftIO $ allocaBytes (cap * sz) $ \buf -> do
-        threadWaitRead fd
-        n <- readEvents unFd (fromIntegral (cap * sz)) buf
-        peekArray (fromIntegral n `div` sz) buf

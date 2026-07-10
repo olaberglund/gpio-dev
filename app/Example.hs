@@ -4,7 +4,8 @@
 
 module Example where
 
-import GPIO.Prelude
+import Gpio.Line
+import Gpio.Pin
 import Control.Concurrent (threadDelay)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forever, void)

@@ -23,13 +23,14 @@ data Bias = PullUp | PullDown | PullUpDown
 data Edge = Rising | Falling | RisingAndFalling
   deriving Eq
 
-data PinSpec = OutSpec Bool | InSpec Bias Edge
-  deriving Eq
+data PinSpec = OutSpec Pi5Gpio Bool | InSpec Pi5Gpio Bias Edge
 
-data Pin = Pin { pinGpio :: Pi5Gpio, pinSpec ::  PinSpec }
+pinOf :: PinSpec -> Pi5Gpio
+pinOf (OutSpec p _) = p
+pinOf (InSpec p _ _) = p
 
-instance Eq Pin where
-  (==) = (==) `on` pinOffset
+instance Eq PinSpec where
+  (==) = (==) `on` pinOf
 
 data Pi5Gpio
     = G0  | G1  | G2  | G3  | G4  | G5  | G6
@@ -40,36 +41,37 @@ data Pi5Gpio
 
 data LineRequest = LineRequest
   { consumer :: ByteString
-  , requests :: [Pin]
+  , requests :: [PinSpec]
   }
 
 data Lines = Lines { lFd :: Fd, lValPtr :: Ptr GpioV2LineValues, lReq :: LineRequest }
 
-newtype LineM (reqs::[Pin]) a = LineM (ReaderT Lines IO a)
+newtype LineM (reqs::[PinSpec]) a = LineM (ReaderT Lines IO a)
     deriving (Functor, Applicative, Monad, MonadIO, MonadThrow, MonadCatch, MonadMask)
 
 data Direction = Output | Input
 
-type In :: Pi5Gpio -> Pin
+type In :: Pi5Gpio -> PinSpec
 type family In pin where
-    In pin = 'Pin pin (InSpec PullDown Rising)
+    In pin = InSpec pin PullDown Rising
 
-type Out :: Pi5Gpio -> Pin
+type Out :: Pi5Gpio -> PinSpec
 type family Out pin where
-    Out pin = 'Pin pin (OutSpec False)
+    Out pin = OutSpec pin False
 
 
-type PinIndex :: Pi5Gpio -> [Pin] -> Nat
+type PinIndex :: Pi5Gpio -> [PinSpec] -> Nat
 type family PinIndex pin reqs where
-  PinIndex pin ('Pin pin _ ': _)    = 0
+  PinIndex pin (OutSpec pin _ ': _)    = 0
+  PinIndex pin (InSpec pin _ _ ': _)    = 0
   PinIndex pin (_   ': rest) = 1 + PinIndex pin rest
   PinIndex pin '[] =
     TypeError ('ShowType pin ':<>: 'Text " was not requested")
 
-type DirectedPinIndex :: Pi5Gpio -> Direction -> [Pin] -> Nat
+type DirectedPinIndex :: Pi5Gpio -> Direction -> [PinSpec] -> Nat
 type family DirectedPinIndex pin dir reqs where
-    DirectedPinIndex pin 'Input  ('Pin pin ('InSpec  _ _) ': _) = 0
-    DirectedPinIndex pin 'Output ('Pin pin ('OutSpec _)   ': _) = 0
+    DirectedPinIndex pin 'Input  (InSpec pin _ _ ': _) = 0
+    DirectedPinIndex pin 'Output (OutSpec pin _   ': _) = 0
     DirectedPinIndex pin dir (_ ': rest) = 1 + DirectedPinIndex pin dir rest
     DirectedPinIndex pin dir '[] =
       TypeError ('ShowType pin
@@ -81,15 +83,21 @@ type family FixedPull pin where
     FixedPull 'G3 = 'Just 'PullUp
     FixedPull _      = 'Nothing
 
-type IsSubsetOf :: [Pin] -> [Pin] -> Symbol -> Constraint
+type PinOf :: PinSpec -> Pi5Gpio
+type family PinOf pinSpec where
+  PinOf (OutSpec pin _)  = pin
+  PinOf (InSpec pin _ _) = pin
+
+type IsSubsetOf :: [PinSpec] -> [PinSpec] -> Symbol -> Constraint
 type family IsSubsetOf xs ys label where
     IsSubsetOf '[] _ _ = ()
-    IsSubsetOf ('Pin p _ ': rest) ys label =
-        (RequireElem p ys label, IsSubsetOf rest ys label)
+    IsSubsetOf (pinSpec ': rest) ys label =
+        (RequireElem (PinOf pinSpec) ys label, IsSubsetOf rest ys label)
 
-type RequireElem :: Pi5Gpio -> [Pin] -> Symbol -> Constraint
+type RequireElem :: Pi5Gpio -> [PinSpec] -> Symbol -> Constraint
 type family RequireElem pin pins label where
-    RequireElem pin ('Pin pin _ ': rest) label = ()
+    RequireElem pin (InSpec pin _ _ ': rest) label = ()
+    RequireElem pin (OutSpec pin _ ': rest) label = ()
     RequireElem pin (_ ': rest) label = RequireElem pin rest label
     RequireElem pin '[] label =
         TypeError ('ShowType pin ':<>: 'Text " is missing from the " ':<>: 'Text label ':<>: 'Text " configuration.")
@@ -107,7 +115,7 @@ type family CheckPull pin bias fixed where
         TypeError ('ShowType pin ':<>: 'Text " has a fixed hardware pull-up. PullDown is impossible.")
     CheckPull _ _ _ = ()
 
-class Requested (pin :: Pi5Gpio) (reqs :: [Pin]) where
+class Requested (pin :: Pi5Gpio) (reqs :: [PinSpec]) where
   pinIndex :: Int
 
 instance KnownNat (PinIndex pin reqs) => Requested pin reqs where
@@ -155,8 +163,8 @@ instance KnownPin 'G25 where pinVal = G25
 instance KnownPin 'G26 where pinVal = G26
 instance KnownPin 'G27 where pinVal = G27
 
-class KnownReq (reqs :: [Pin]) where
-  reqVal :: [Pin]
+class KnownReq (reqs :: [PinSpec]) where
+  reqVal :: [PinSpec]
 instance KnownReq '[] where
   reqVal = []
 
@@ -173,22 +181,24 @@ instance KnownBool 'True  where boolVal = True
 instance KnownBool 'False where boolVal = False
 
 instance (KnownPin pin, KnownBias bias, KnownEdge edg, ValidBias pin bias, KnownReq rest)
-      => KnownReq ('Pin pin ('InSpec bias edg) ': rest) where
-  reqVal = Pin (pinVal @pin) (InSpec (biasVal @bias) (edgeVal @edg)) : reqVal @rest
+      => KnownReq (InSpec pin bias edg ': rest) where
+  reqVal = InSpec (pinVal @pin) (biasVal @bias) (edgeVal @edg) : reqVal @rest
 
 instance (KnownPin pin, KnownBool val, KnownReq rest)
-      => KnownReq ('Pin pin ('OutSpec val) ': rest) where
-  reqVal = Pin (pinVal @pin) (OutSpec (boolVal @val)) : reqVal @rest
+      => KnownReq (OutSpec pin val ': rest) where
+  reqVal = OutSpec (pinVal @pin) (boolVal @val) : reqVal @rest
 
-type AsInput :: [Pin] -> [Pin]
+type AsInput :: [PinSpec] -> [PinSpec]
 type family AsInput pins where
   AsInput '[] = '[]
-  AsInput ('Pin G2 _ ': rest) = 'Pin G2 ('InSpec 'PullUp 'Falling) ': AsInput rest
-  AsInput ('Pin G3 _ ': rest) = 'Pin G3 ('InSpec 'PullUp 'Falling) ': AsInput rest
-  AsInput ('Pin p _ ': rest) = 'Pin p ('InSpec 'PullDown 'Falling) ': AsInput rest
+  AsInput (OutSpec G2 _ ': rest) = InSpec G2 PullUp Falling ': AsInput rest
+  AsInput (InSpec G2 _ _ ': rest) = InSpec G2 PullUp Falling ': AsInput rest
+  AsInput (OutSpec G3 _ ': rest) = InSpec G3 PullUp Falling ': AsInput rest
+  AsInput (InSpec G3 _ _ ': rest) = InSpec G3 PullUp Falling ': AsInput rest
+  AsInput (pinSpec ': rest) = InSpec (PinOf pinSpec) PullDown Falling ': AsInput rest
 
-pinOffset :: Pin -> Int
-pinOffset = fromEnum . pinGpio
+pinOffset :: PinSpec -> Int
+pinOffset = fromEnum . pinOf
 
 gpioV2LineRequest :: LineRequest -> GpioV2LineRequest
 gpioV2LineRequest lr@(LineRequest{..}) = GpioV2LineRequest
@@ -209,8 +219,8 @@ gpioV2LineConfig LineRequest{..} = GpioV2LineConfig
   where
       attrs = concat $ zipWith configAttributes requests [0 ..]
 
-configAttributes :: Pin -> Int -> [GpioV2LineConfigAttribute]
-configAttributes (Pin _ spec) offsetIdx = flags : values
+configAttributes :: PinSpec -> Int -> [GpioV2LineConfigAttribute]
+configAttributes spec offsetIdx = flags : values
   where
       flags =
           GpioV2LineConfigAttribute
@@ -218,7 +228,7 @@ configAttributes (Pin _ spec) offsetIdx = flags : values
             (bit offsetIdx)
 
       values = case spec of
-          OutSpec v ->
+          OutSpec _ v ->
               [ GpioV2LineConfigAttribute
                   (GpioV2LineAttribute attributeIdValues (initMask v))
                   (bit offsetIdx) ]
@@ -242,5 +252,5 @@ edgesFlag = \case
     
 directionFlags :: PinSpec -> [GpioV2LineFlag]
 directionFlags = \case
-  InSpec isBias isEdge  -> [ flagInput, biasFlag isBias, edgesFlag isEdge ]
-  OutSpec _ -> [ flagOutput ]
+  InSpec _ isBias isEdge  -> [ flagInput, biasFlag isBias, edgesFlag isEdge ]
+  OutSpec _ _ -> [ flagOutput ]

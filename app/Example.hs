@@ -22,12 +22,12 @@ blink =
 
 
 click :: IO ()
-click = withLine @'[ 'Pin G17 (OutSpec True), In G4] do
+click = withLine @'[ OutSpec G17 True, In G4] do
            void (nextEvents @G4)
 
 blinkClickToStop :: IO ()
 blinkClickToStop = do
-    withLine @'[ 'Pin G17 (OutSpec True), In G4] do
+    withLine @'[ OutSpec G17 True, In G4] do
         blinkTid <- forkLineM . forever $ do
             togglePin @G17
             liftIO (threadDelay 500_000)

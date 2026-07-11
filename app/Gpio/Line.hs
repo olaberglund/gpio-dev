@@ -86,3 +86,9 @@ nextEvents = LineM do
         threadWaitRead fd
         n <- readEvents unFd (fromIntegral (cap * sz)) buf
         peekArray (fromIntegral n `div` sz) buf
+
+forkLineM :: LineM reqs () -> LineM reqs ThreadId
+forkLineM (LineM act) = LineM do
+    lines <- ask
+    liftIO $ forkIO (runReaderT act lines)
+
